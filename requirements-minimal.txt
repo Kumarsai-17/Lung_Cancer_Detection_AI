@@ -1,0 +1,10 @@
+# Minimal requirements for maximum compatibility
+Flask
+numpy
+pandas
+scikit-learn
+lightgbm
+tensorflow
+joblib
+Pillow
+gunicorn
