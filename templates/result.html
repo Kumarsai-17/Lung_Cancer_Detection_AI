@@ -587,7 +587,7 @@
         }
 
         .symptom-item {
-            background: white;
+             background: var(--primary-bg);
             padding: 10px;
             border-radius: 5px;
             border-left: 3px solid #e74c3c;
@@ -724,6 +724,29 @@
                 width: 100%;
                 justify-content: center;
             }
+
+            /* Tablet optimization for metrics */
+            .metrics {
+                grid-template-columns: repeat(2, 1fr);
+                gap: 0.875rem;
+            }
+
+            .metric {
+                padding: 1rem;
+                background: rgba(55, 65, 81, 0.5);
+                border: 1px solid var(--border-primary);
+                border-radius: var(--border-radius-sm);
+            }
+
+            .metric-value {
+                font-size: 1.15rem;
+                color: var(--text-primary);
+            }
+
+            .metric-label {
+                font-size: 0.9rem;
+                color: var(--text-secondary);
+            }
         }
 
         @media (max-width: 480px) {
@@ -754,6 +777,31 @@
 
             .risk-level {
                 font-size: 1.75rem;
+            }
+
+            /* Mobile optimization for metrics section */
+            .metrics {
+                grid-template-columns: 1fr;
+                gap: 0.75rem;
+                margin-top: 1rem;
+            }
+
+            .metric {
+                padding: 0.875rem;
+                border-radius: var(--border-radius-sm);
+                background: rgba(55, 65, 81, 0.6);
+                border: 1px solid var(--border-primary);
+            }
+
+            .metric-value {
+                font-size: 1.1rem;
+                color: var(--text-primary);
+                margin-bottom: 0.25rem;
+            }
+
+            .metric-label {
+                font-size: 0.875rem;
+                color: var(--text-secondary);
             }
         }
 
