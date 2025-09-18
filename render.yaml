@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: ai-lung-detector
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: PYTHONUNBUFFERED
+        value: 1
+    healthCheckPath: /
+    autoDeploy: true
