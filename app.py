@@ -90,32 +90,57 @@ class OptimizedLungCancerPredictor:
             logger.error(f"ERROR: Model loading failed: {str(e)}")
             
     def preprocess_features(self, patient_data):
-        """Preprocess patient features for ML prediction"""
+        """Preprocess patient features for ML prediction (robust to scaler shape mismatches)."""
         try:
             # Create basic feature vector (15 features only)
             features = []
             for feature in self.feature_names:
                 features.append(patient_data.get(feature, 0))
             
-            # Convert to DataFrame
+            # Convert to DataFrame (keep column names so tree models like feature-name checks go away)
             df = pd.DataFrame([features], columns=self.feature_names)
             
             # Store original features for corrected prediction
             self.last_original_features = features.copy()
             
-            # Apply scaler if available (expecting 15 features)
+            # Apply scaler if available (handling shape mismatch)
             if self.scaler:
                 try:
-                    features_scaled = self.scaler.transform(df)
+                    expected = getattr(self.scaler, "n_features_in_", None)
+                    X_for_scaler = df.copy()
+                    
+                    if expected is not None:
+                        if expected > X_for_scaler.shape[1]:
+                            # Pad missing columns with zeros to match expected shape
+                            n_missing = expected - X_for_scaler.shape[1]
+                            pad_cols = {f'PAD_COL_{i}': 0 for i in range(n_missing)}
+                            for k, v in pad_cols.items():
+                                X_for_scaler[k] = v
+                            logger.info(f"Scaler expects {expected} features; padded with {n_missing} zeros.")
+                        elif expected < X_for_scaler.shape[1]:
+                            # Trim to expected columns (keep left-most columns)
+                            X_for_scaler = X_for_scaler.iloc[:, :expected]
+                            logger.info(f"Scaler expects {expected} features; trimmed input to match.")
+                    
+                    # Now transform (if scaler still errors, fallback to safe normalization)
+                    features_scaled = self.scaler.transform(X_for_scaler)
+                    # If scaler returned more columns than our original features, keep first len(feature_names)
+                    if features_scaled.ndim == 2 and features_scaled.shape[1] >= len(self.feature_names):
+                        features_scaled = features_scaled[:, :len(self.feature_names)]
                     logger.info("Scaler applied successfully")
                 except Exception as e:
                     logger.warning(f"Scaler failed, using normalized data: {e}")
-                    # Normalize manually as fallback
-                    features_scaled = df.values / df.values.max(axis=0, keepdims=True)
-                    features_scaled = np.nan_to_num(features_scaled, 0)
+                    # Safe manual normalization fallback (avoid divide-by-zero)
+                    vals = df.values.astype(float)
+                    col_max = vals.max(axis=0, keepdims=True)
+                    col_max_safe = np.where(np.isfinite(col_max) & (col_max != 0), col_max, 1.0)
+                    features_scaled = np.nan_to_num(vals / col_max_safe, 0.0)
             else:
-                # Simple normalization
-                features_scaled = df.values / 100.0  # Simple scaling
+                # Simple safe normalization
+                vals = df.values.astype(float)
+                col_max = vals.max(axis=0, keepdims=True)
+                col_max_safe = np.where(np.isfinite(col_max) & (col_max != 0), col_max, 1.0)
+                features_scaled = np.nan_to_num(vals / col_max_safe, 0.0)
                 
             return features_scaled, df
             
@@ -182,26 +207,67 @@ class OptimizedLungCancerPredictor:
             if not self.lgb_model:
                 return self.create_corrected_prediction(features_scaled, 'LightGBM')
             
-            # Ensure we have the right number of features
-            if features_scaled.shape[1] != 15:
-                logger.warning(f"Expected 15 features, got {features_scaled.shape[1]}")
-                return self.create_corrected_prediction(features_scaled, 'LightGBM')
-            
-            # Try original model first
+            # Ensure we have the right number of features by mapping back to a DataFrame with names
             try:
-                prediction_proba = self.lgb_model.predict_proba(features_scaled)[0]
-                prediction = self.lgb_model.predict(features_scaled)[0]
+                # Try to get model feature names from the model (support several APIs)
+                model_feature_names = None
+                # sklearn wrapper has attribute feature_name_
+                if hasattr(self.lgb_model, 'feature_name_'):
+                    try:
+                        model_feature_names = list(self.lgb_model.feature_name_)
+                    except Exception:
+                        model_feature_names = None
+                # lightgbm Booster inside a wrapper
+                if model_feature_names is None:
+                    try:
+                        if hasattr(self.lgb_model, 'booster_') and hasattr(self.lgb_model.booster_, 'feature_name'):
+                            model_feature_names = self.lgb_model.booster_.feature_name()
+                    except Exception:
+                        model_feature_names = None
+                # fallback to model's method
+                if model_feature_names is None and hasattr(self.lgb_model, 'feature_name'):
+                    try:
+                        model_feature_names = self.lgb_model.feature_name()
+                    except Exception:
+                        model_feature_names = None
+                # final fallback to predictor's feature names
+                if model_feature_names is None:
+                    model_feature_names = self.feature_names
+
+                # Prepare numpy array
+                X = np.asarray(features_scaled)
+                if X.ndim == 1:
+                    X = X.reshape(1, -1)
+
+                # Pad or trim to model expected length
+                if len(model_feature_names) != X.shape[1]:
+                    needed = len(model_feature_names)
+                    if needed > X.shape[1]:
+                        pad = np.zeros((X.shape[0], needed - X.shape[1]))
+                        X_adj = np.hstack([X, pad])
+                        logger.info(f"Padded features array from {X.shape[1]} -> {needed} to match model.")
+                    else:
+                        X_adj = X[:, :needed]
+                        logger.info(f"Trimmed features array from {X.shape[1]} -> {needed} to match model.")
+                    X = X_adj
+
+                # Build DataFrame with model feature names
+                X_df = pd.DataFrame(X, columns=model_feature_names)
+
+                # Attempt prediction; but keep your "corrected prediction" behavior as fallback / calibration guard
+                try:
+                    prediction_proba = self.lgb_model.predict_proba(X_df)[0]
+                    prediction = self.lgb_model.predict(X_df)[0]
+                    # As in original code you chose to use a corrected prediction due to calibration concerns
+                    logger.warning("Using corrected prediction due to model calibration issues")
+                    return self.create_corrected_prediction(features_scaled, 'LightGBM Model')
+                except Exception as model_error:
+                    logger.error(f"LightGBM model error: {model_error}")
+                    return self.create_corrected_prediction(features_scaled, 'LightGBM (Fallback)')
                 
-                # Check if model results are reasonable
-                original_prob = float(prediction_proba[1]) if len(prediction_proba) >= 2 else 0.5
-                
-                # Use corrected prediction instead of potentially faulty model
-                logger.warning("Using corrected prediction due to model calibration issues")
-                return self.create_corrected_prediction(features_scaled, 'LightGBM Model')
-                
-            except Exception as model_error:
-                logger.error(f"LightGBM model error: {model_error}")
-                return self.create_corrected_prediction(features_scaled, 'LightGBM (Fallback)')
+            except Exception as inner_e:
+                logger.error(f"ERROR preparing LGB input: {inner_e}")
+                return self.create_corrected_prediction(features_scaled, 'LightGBM (Input Prep Failure)')
             
         except Exception as e:
             logger.error(f"ERROR: LightGBM prediction failed: {str(e)}")
@@ -719,9 +785,12 @@ class OptimizedLungCancerPredictor:
             
             # Model results
             if lgb_result:
-                print(f"\nLIGHTGBM MODEL:")
-                print(f"  Prediction: {lgb_result['prediction']} | Probability: {lgb_result['probability']:.4f}")
-                print(f"  Confidence: {lgb_result['confidence']:.2f}% | Accuracy: {lgb_result['accuracy']}%")
+                try:
+                    print(f"\nLIGHTGBM MODEL:")
+                    print(f"  Prediction: {lgb_result.get('prediction', 'N/A')} | Probability: {float(lgb_result.get('probability', 0)) if isinstance(lgb_result.get('probability', 0), (float, int)) else lgb_result.get('probability')}")
+                    print(f"  Confidence: {lgb_result.get('confidence', 'N/A')} | Accuracy: {lgb_result.get('accuracy', 'N/A')}")
+                except Exception:
+                    logger.debug("Could not pretty-print LGB result")
                 
             if cnn_result:
                 print(f"\nCNN MODEL:")
@@ -876,7 +945,8 @@ def predict_hybrid():
                 'patient_info': {
                     'name': patient_data['name'],
                     'age': patient_data['AGE'],
-                    'gender': self.get_gender_display(patient_data.get('GENDER', 0)),
+                    # FIXED: use predictor (module-level instance) instead of self in route scope
+                    'gender': predictor.get_gender_display(patient_data.get('GENDER', 0)),
                     'smoking': 'Yes' if patient_data['SMOKING'] == 1 else 'No'
                 }
             }

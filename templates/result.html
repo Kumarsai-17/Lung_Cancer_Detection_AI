@@ -599,11 +599,18 @@
         }
 
         .uploaded-image {
-            max-width: 400px;
-            max-height: 400px;
+            max-width: 100%;
+            /* scale to container width */
+            height: auto;
+            /* keep proportions */
             border-radius: 10px;
             box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+            display: block;
+            /* ensures it behaves well in flex/centered layouts */
+            margin: 0 auto;
+            /* centers the image */
         }
+
 
         .actions {
             display: flex;
